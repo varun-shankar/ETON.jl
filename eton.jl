@@ -68,10 +68,10 @@ data = [datagen(Agen(16,16),p) for i=1:100]
 ## Model ##
 
 encoder = Dense(2,16)
-eton = Chain(Eton00(gs,16=>16,16,relu,swish),
-             Eton01(gs,16=>16,16,relu,swish),
-             Eton11(gs,16=>16,16,relu,swish),
-             Eton10(gs,16=>16,16,relu,swish),
+eton = Chain(Eton00(gs,16=>16,16,relu,sigmoid),
+             Eton01(gs,16=>16,16,relu,sigmoid),
+             Eton11(gs,16=>16,16,relu,sigmoid),
+             Eton10(gs,16=>16,16,relu,sigmoid),
              Eton00(gs,16=>16,16,relu))
 net = eton
 decoder = Dense(16,1)
@@ -102,11 +102,11 @@ eton = gpu(eton)
 net = gpu(net)
 decoder = gpu(decoder)
 f, ut = gpu(f), gpu(ut)
-test_data = [(f,ut)]
 CUDA.allowscalar(false)
 
 ps = Flux.params(encoder,net,decoder)
-train_data = ncycle(test_data,1000)
+test_data = [(f,ut)]
+train_data = ncycle(data,10)
 function cb() 
     @show(loss(f,ut))
     # save_data(p,f,ut)
