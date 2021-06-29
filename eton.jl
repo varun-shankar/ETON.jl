@@ -21,15 +21,14 @@ include("network.jl")
 xbounds = [0,pi]
 ybounds = [0,pi]
 
-N = 100
-bp = [[rand(xbounds,N)';rand(Uniform(ybounds...),N)']';
-      [rand(Uniform(xbounds...),N)';rand(ybounds,N)']'] 
+# N = 100
+# bp = [[rand(xbounds,N)';rand(Uniform(ybounds...),N)']';
+#       [rand(Uniform(xbounds...),N)';rand(ybounds,N)']'] 
 
-M = 800
-dp = [rand(Uniform(xbounds...),M)';rand(Uniform(ybounds...),M)']'
+# M = 800
+# dp = [rand(Uniform(xbounds...),M)';rand(Uniform(ybounds...),M)']'
 
-loc = [bp;dp]
-# bound = [ones(2*N);zeros(M)]'
+# loc = [bp;dp]
 
 M = 32
 xx,yy = meshgrid(range(0,stop=pi,length=M))
@@ -74,22 +73,14 @@ eton = Chain(Eton00(gs,16=>16,16,relu,swish),
              Eton11(gs,16=>16,16,relu,swish),
              Eton10(gs,16=>16,16,relu,swish),
              Eton00(gs,16=>16,16,relu))
-net = Chain(SkipConnection(eton,+),
-            SkipConnection(eton,+),
-            SkipConnection(eton,+))
-net = Chain(Eton00(gs,1=>1,16,relu,swish),
-            Eton00(gs,1=>1,16,relu,swish),
-            Eton00(gs,1=>1,16,relu,swish),
-            Eton00(gs,1=>1,16,relu,swish),
-            Eton00(gs,1=>1,16,relu,swish),
-            Eton00(gs,1=>1,16,relu))
+net = eton
 decoder = Dense(16,1)
 
 function model(f)
-    X = f#hcat(f,bound)
-    # X = encoder(X|>tr)|>tr
+    X = hcat(f,bound)
+    X = encoder(X|>tr)|>tr
     Y = net(X)
-    # out = decoder(Y|>tr)|>tr
+    out = decoder(Y|>tr)|>tr
 end
 
 function loss(f,ut)
