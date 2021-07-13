@@ -40,7 +40,7 @@ bound = (p[:,1].==xbounds[1]).|(p[:,1].==xbounds[2]).|(p[:,2].==ybounds[1]).|(p[
 k = 16
 r = pi/(M/2)
 
-i, j, tree, idxs = build_graph(p,r,false)
+i, j, tree, idxs = build_graph(p,k,false,true)
 
 gs = GraphStruct(i,j,p)
 
@@ -61,20 +61,25 @@ end
 @load "fcs.bson" fcs
 # fcs = Agen(16,16)
 f, ut = datagen(fcs,p)
+# f = rotl90(reshape(f,M,M))[:]
+# ut = rotl90(reshape(ut,M,M))[:]
 
 data = [datagen(Agen(16,16),p) for i=1:100]
 
 ###################################################################################################
 ## Model ##
 
-encoder = Dense(2,16)
-eton = Chain(Eton00(gs,16=>16,16,relu,sigmoid),
-             Eton01(gs,16=>16,16,relu,sigmoid),
-             Eton11(gs,16=>16,16,relu,sigmoid),
-             Eton10(gs,16=>16,16,relu,sigmoid),
-             Eton00(gs,16=>16,16,relu))
-net = eton
-decoder = Dense(16,1)
+encoder = Dense(2,8)
+eton = Chain(Eton00(gs,8=>8,16,swish,swish),
+             Eton00(gs,8=>8,16,swish,swish),
+             Eton00(gs,8=>8,16,swish,swish),
+             Eton00(gs,8=>8,16,swish))
+net = Chain(SkipConnection(eton,+),
+            SkipConnection(eton,+),
+            SkipConnection(eton,+),
+            SkipConnection(eton,+),
+            SkipConnection(eton,+))
+decoder = Dense(8,1)
 
 function model(f)
     X = hcat(f,bound)
@@ -85,15 +90,15 @@ end
 
 function loss(f,ut)
     up = model(f)
-    l = mean(abs2,ut.-up)
+    l = mean(abs2,ut.-up)#./mean(abs2,ut)
 end               
              
 ###################################################################################################
 ## Training ##
 
-opt = ADAM(5e-4)
-# @load "weights.bson" weights 
-# Flux.loadparams!([encoder,net,decoder],weights)
+opt = ADAM(1e-7)
+@load "weights.bson" weights 
+Flux.loadparams!([encoder,net,decoder],weights)
 
 data = gpu(data)
 bound = gpu(bound)
@@ -106,7 +111,7 @@ CUDA.allowscalar(false)
 
 ps = Flux.params(encoder,net,decoder)
 test_data = [(f,ut)]
-train_data = ncycle(data,10)
+train_data = ncycle(test_data,10000)
 function cb() 
     @show(loss(f,ut))
     # save_data(p,f,ut)

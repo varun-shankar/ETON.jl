@@ -2,6 +2,7 @@
 BSON = "fbb218c0-5317-5bc6-957e-2ee96dd4b1f0"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+ExprTools = "e2ba6199-217a-4e67-a87a-7c52f15ade04"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
 GeometricFlux = "7e08b658-56d3-11e9-2997-919d5b31e4ea"
 IterTools = "c8e1da08-722c-5040-9ed9-7db0dc04731e"
