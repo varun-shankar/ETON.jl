@@ -76,3 +76,5 @@ function rot(θ)
     [cos.(θ) -sin.(θ);
      sin.(θ) cos.(θ)]
 end
+
+mag(X) = sqrt.(sum(X.^2,dims=3)[:,:,1])

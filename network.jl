@@ -1,12 +1,66 @@
+## Spherical harmonics setup ##
+
+function Ys(l,rv,r)
+    x = rv[:,1]; y = rv[:,2]; z = rv[:,3]
+    if l==0
+        harm = .5*sqrt(1/pi) .*x.^0
+        return harm
+    elseif l==1
+        harm = hcat(sqrt(3/(4*pi)).*y./r,
+                    sqrt(3/(4*pi)).*z./r,
+                    sqrt(3/(4*pi)).*x./r)
+        return replace!(harm,NaN=>0)
+    elseif l==2
+        harm = hcat(.5*sqrt(15/pi).*x.*y./r.^2,
+                    .5*sqrt(15/pi).*z.*y./r.^2,
+                    .25*sqrt(5/pi).*(-x.^2-y.^2+2*z.^2)./r.^2,
+                    .5*sqrt(15/pi).*x.*z./r.^2,
+                    .25*sqrt(15/pi).*(x.^2 .-y.^2)./r.^2)
+        return replace!(harm,NaN=>0)
+    else
+        error("Do not have rank ",l," harmonics stored")
+    end
+end 
+
+function cart_basis()
+    inds = [(3,1,1), (2,2,1), (1,3,1),
+            (2,1,2), (1,2,2),
+            (3,1,3), (1,3,3),
+            (3,2,4), (2,3,4),
+            (1,1,5), 
+            (2,1,6), (1,2,6),
+            (3,1,7), (2,2,7), (1,3,7),
+            (3,2,8), (2,3,8),
+            (3,3,9)]
+    coef = [√3,-√3,√3,
+            √2,-√2,
+            √2,-√2,
+            √2,-√2,
+            1,
+            √2,√2,
+            √6,√(3/2),√6,
+            √2,√2,
+            1].^-1
+    CG = zeros(3,3,9); CG[CartesianIndex.(inds)].=coef
+    T = [ 1/√2 -im/√2 0;
+        0     0     1;
+        -1/√2 -im/√2 0]
+    c2r = Array(Complex.(I(9).*1.))
+    c2r[2,[2,4]].=im/√2; c2r[4,[2,4]].=1/√2 .*[1,-1]
+    c2r[5,[5,9]].=im/√2 .*[1,-1]; c2r[9,[5,9]].=1/√2
+    c2r[6,[6,8]].=im/√2; c2r[8,[6,8]].=1/√2 .*[1,-1]
+    cartbasis = real(cat(((c2r*[transpose(T)*CG[:,:,i]*T for i=1:9]).*
+                [1;-im*ones(3);ones(5)])...,dims=3))
+end
+
 ## Graph storage ##
 """
 Stores quantites associated with the graph
 i,j are the non-zero indices of the adjacency matrix (not stored explicitly)
     Stored as vectors of length NNZ
-p are the locations of the points (N x 2)
-rv stores the distance vector between the ijth points (NNZ x 2)
+p are the locations of the points (N x 3)
+rv stores the distance vector between the ijth points (NNZ x 3)
 r is the magnitude of rv (NNZ x 1)
-θ is the angle between the ijth points (NNZ x 1)
 N = number of nodes in the graph
 NN is the number of neighbors for each node (N x 1)
 sp is a boolean sparse matrix (N x NNZ)
@@ -28,22 +82,29 @@ struct GraphStruct{T}
     i::AbstractArray
     j::AbstractArray
     p::AbstractArray{T}
-    rv::AbstractArray{T}
-    r::AbstractArray{T}
-    θ::AbstractArray{T}
-    N::Int
-    NN::AbstractArray
     sp::AbstractArray
+    r::AbstractArray{T}
+    Y::AbstractArray
+    cartbasis::AbstractArray{T}
+    N::Int
 end
 
 function GraphStruct(i::AbstractVector,j::AbstractVector,p::AbstractArray)
     N = size(p,1)
-    NN = dropdims(sum(sparse(i,j,1),dims=2),dims=2)
+    NNZ = length(i)
+
+    deg = dropdims(sum(sparse(i,j,1),dims=2),dims=2) .-1
+    L = -ones(NNZ); L[i.==j] .= deg[i[i.==j]] # graph laplacian
+    Ln = -1 ./sqrt.(deg[i].*deg[j]); Ln[i.==j] .= 1 # normalized laplacian
+    sp = sparse(tr(i.==(1:N)')).*Float32.(L)'
+
     rv = p[i,:].-p[j,:]
     r = sqrt.(sum(abs2,rv,dims=2))
-    θ = atan.(rv[:,2],rv[:,1])
-    sp = sparse(Float32.(tr(i.==(1:N)')))
-    GraphStruct(i,j,p,rv,r,θ,N,NN,sp)
+
+    Y = [Ys(i,rv,r) for i=0:2]
+    cartbasis = permutedims(cart_basis(),[3,1,2])
+
+    GraphStruct(i,j,p,sp,r,Y,cartbasis,N)
 end
 
 Flux.@functor GraphStruct
@@ -75,42 +136,35 @@ Layer operations:
     5. Convolve with sp
     6. Sum pointwise and pairwise and apply NL
 """
-struct Eton00{T,Po,R,F,G<:GraphStruct}
+struct Eton00{T,F,G}
     weight::AbstractArray{T}
-    bias::AbstractVector{T}
-    pointwise::Po   
-    radial::R    
+    bias::AbstractVector{T} 
     σ::F
     gs::G
     ch::Pair{<:Integer,<:Integer}
 end
 
-function Eton00(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, pointwise, radial, σ = identity;
+function Eton00(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, p, σ = identity;
     init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
     b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
-    Eton00(T.(init(ch[1], ch[2])),b, pointwise, radial, σ, gs, ch)
-end
-
-function Eton00(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, hl::Int = 16, 
-    γ = identity, σ = identity; kwargs...)
-    pointwise = Chain(Dense(ch[1],hl,γ), Dense(hl,ch[2]))
-    radial = Chain(Dense(1,hl,γ), Dense(hl,ch[2]))
-    Eton00(gs, ch, pointwise, radial, σ; kwargs...)
+    w = T.(init(ch[1], ch[2], p+1))
+    Eton00(w, b, σ, Ref(gs), ch)
 end
 
 Flux.@functor Eton00
 
 function (e::Eton00)(X::AbstractArray{T}) where {T}
-    # Linear transform input features
-    Xo = X*e.weight
-    # Apply pointwise weighting
-    Y1 = Xo.*tr(e.pointwise(X|>tr))
-    # Calculate RBF
-    G = tr(e.radial(e.gs.r|>tr))
-    # Apply radial function and convolve from graph
-    Y2 = e.gs.sp*(Xo[e.gs.j,:].*G)
-    # Non-linearity
-    out = e.σ.((Y1.+Y2))
+
+    Rp = e.gs[].r.^(0:size(e.weight,3)-1)'
+    w = e.weight
+    @tullio f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
+
+    Xj = X[e.gs[].j,:]
+    @tullio Z[nnz,co] := f[nnz,ci,co]*Xj[nnz,ci]
+   
+    out = e.gs[].sp*Z
+    out = e.σ.(out.+tr(e.bias))
+    
     return out
 end
 
@@ -128,47 +182,39 @@ Layer operations:
     5. Convolve with sp
     6. Apply NL to magnitude of the output features
 """
-struct Eton01{T,Fi,R,F,G<:GraphStruct}
+struct Eton01{T,F,G}
     weight::AbstractArray{T}
     bias::AbstractVector{T}
-    filter::Fi # 2 x fo
-    radial::R  
     σ::F
     gs::G
     ch::Pair{<:Integer,<:Integer}
 end
 
-function Eton01(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, radial, σ = identity;
+function Eton01(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, p, σ = identity;
     init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
     b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
-    Eton01(T.(init(ch[1], ch[2])), b, T.(init(2, ch[2])), radial, σ, gs, ch)
-end
-
-function Eton01(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, hl::Int = 16, 
-    γ = identity, σ = identity; kwargs...)
-    radial = Chain(Dense(1,hl,γ), Dense(hl,ch[2]))
-    Eton01(gs, ch, radial, σ; kwargs...)
+    w = T.(init(ch[1], ch[2], p))
+    Eton01(w, b, σ, Ref(gs), ch)
 end
 
 Flux.@functor Eton01
 
 function (e::Eton01)(X::AbstractArray{T}) where {T}
-    # Linear transform input features
-    Xo = X*e.weight # N x fo
-    # Rotate each filter
-    filter = e.filter./(sqrt.(sum(e.filter.^2,dims=1)))
-    F = Flux.stack(batchmul.([rot(e.gs.θ)],Flux.unstack(adim(filter,2),3)),4) # 2 x 1 x NNZ x fo
-    F = dropdims(permutedims(F,[3,4,1,2]),dims=4) # NNZ x fo x 2
-    # Calculate RBF
-    R = tr(e.radial(e.gs.r|>tr)) # NNZ x fo
-    # Radially weight filters
-    G = F.*R # NNZ x fo x 2
-    # Apply filters via scalar multiplication
-    Y = Xo[e.gs.j,:].*G # NNZ x fo x 2
-    # Convolve
-    Y = Flux.stack([e.gs.sp].*Flux.unstack(Y,3),3) # N x fo x 2
-    # Non-linearity
-    out = e.σ.(sqrt.(sum(Y.^2,dims=3))).*Y
+   
+    Rp = e.gs[].r.^(1:size(e.weight,3))'
+    w = e.weight
+    @tullio f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
+
+    rh = e.gs[].Y[2][:,[3,1,2]]
+    f = f.*adim(adim(rh,2),2)
+
+    Xj = X[e.gs[].j,:]
+    @tullio Z[nnz,co,d] := f[nnz,ci,co,d]*Xj[nnz,ci]
+    
+    sp = e.gs[].sp
+    @tullio out[n,co,d] := sp[n,nnz]*Z[nnz,co,d]
+    out = e.σ.(mag(out).+tr(e.bias)).*out
+    
     return out
 end
 
@@ -189,8 +235,6 @@ Layer operations:
 struct Eton10{T,Fi,R,F,G<:GraphStruct}
     weight::AbstractArray{T}
     bias::AbstractVector{T}
-    filter::Fi
-    radial::R
     σ::F
     gs::G
     ch::Pair{<:Integer,<:Integer}
@@ -244,48 +288,49 @@ Layer operations:
     5. Convolve with sp
     6. Apply NL to magnitude of the output features
 """
-struct Eton11{T,Fi,R,F,G<:GraphStruct}
-    weight::AbstractArray{T}
+struct Eton11{T,F,G}
+    weight0::AbstractArray{T}
+    weight1::AbstractArray{T}
+    weight2::AbstractArray{T}
     bias::AbstractVector{T}
-    filter::Fi
-    radial::R
     σ::F
     gs::G
     ch::Pair{<:Integer,<:Integer}
 end
 
-function Eton11(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, radial, σ = identity;
+function Eton11(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, p, σ = identity;
     init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
     b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
-    Eton11(T.(init(ch[1], ch[2])), b, T.(init(2,2, ch[2])), radial, σ, gs, ch)
-end
-
-function Eton11(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, hl::Int = 16, 
-    γ = identity, σ = identity; kwargs...)
-    radial = Chain(Dense(1,hl,γ), Dense(hl,ch[2]))
-    Eton11(gs, ch, radial, σ; kwargs...)
+    w0 = T.(init(ch[1], ch[2], p+1))
+    w1 = T.(init(ch[1], ch[2], p))
+    w2 = T.(init(ch[1], ch[2], p))
+    Eton11(w0, w1, w2, b, σ, Ref(gs), ch)
 end
 
 Flux.@functor Eton11
 
 function (e::Eton11)(X::AbstractArray{T}) where {T}
-    # Linear transform input features
-    Xo = batchmul(X,e.weight) # N x fo x 2
-    # Rotate each filter
-    filter = e.filter./(adim(adim(vcat([sum(diag(e.filter[:,:,i]),dims=1) for i=1:e.ch[2]]...),1),1))
-    F = Flux.stack(batchmul.([rot(e.gs.θ)],Flux.unstack(filter,3)),4) # 2 x 2 x NNZ x fo
-    F = permutedims(F,[3,4,1,2]) # NNZ x fo x 2 x 2
-    # Calculate RBF
-    R = tr(e.radial(e.gs.r|>tr)) # NNZ x fo
-    # Radially weight filters
-    G = F.*R # NNZ x fo x 2 x 2
-    # Apply filters via matvec
-    Y = batchmul(permutedims(G,[3,4,1,2]),permutedims(adim(Xo[e.gs.j,:,:]),[3,4,1,2])) # 2 x 1 x NNZ x fo
-    Y = dropdims(permutedims(Y,[3,4,1,2]),dims=4) # NNZ x fo x 2
-    # Convolve
-    Y = Flux.stack([e.gs.sp].*Flux.unstack(Y,3),3)
-    # Non-linearity
-    out = e.σ.(sqrt.(sum(Y.^2,dims=3))).*Y
+    
+    w0,w1,w2 = e.weight0, e.weight1, e.weight2
+    Rp = e.gs[].r.^(0:size(e.weight0,3)-1)'
+    @tullio f0[nnz,ci,co] := Rp[nnz,p]*w0[ci,co,p]
+    Rp = Rp[:,2:end]
+    @tullio f1[nnz,ci,co] := Rp[nnz,p]*w1[ci,co,p]
+    @tullio f2[nnz,ci,co] := Rp[nnz,p]*w2[ci,co,p]
+
+    f0 = f0.*adim(adim(adim(e.gs[].Y[1],2),2),2)
+    f1 = f1.*adim(adim(e.gs[].Y[2],2),2)
+    f2 = f2.*adim(adim(e.gs[].Y[3],2),2)
+    f = cat(f0,f1,f2,dims=4)
+    f = sum(f.*adim(adim(adim(e.gs[].cartbasis,1),1),1),dims=4)[:,:,:,1,:,:]
+
+    Xj = X[e.gs[].j,:,:]
+    @tullio Z[nnz,co,d1] := f[nnz,ci,co,d1,d2]*Xj[nnz,ci,d2]
+    
+    sp = e.gs[].sp
+    @tullio out[n,co,d] := sp[n,nnz]*Z[nnz,co,d]
+    out = e.σ.(mag(out).+tr(e.bias)).*out
+    
     return out
 end
 
