@@ -1,5 +1,9 @@
 ## Spherical harmonics setup ##
-
+"""
+Functions to compute spherical harmonics and cartesian bases
+Ys(l,rv,r) computes harmonics for rank-l and directions rv
+cart_basis() uses Clebsch-Gordon coefficients to compute a basis
+"""
 function Ys(l,rv,r)
     x = rv[:,1]; y = rv[:,2]; z = rv[:,3]
     if l==0
@@ -43,8 +47,8 @@ function cart_basis()
             1].^-1
     CG = zeros(3,3,9); CG[CartesianIndex.(inds)].=coef
     T = [ 1/√2 -im/√2 0;
-        0     0     1;
-        -1/√2 -im/√2 0]
+          0     0     1;
+         -1/√2 -im/√2 0]
     c2r = Array(Complex.(I(9).*1.))
     c2r[2,[2,4]].=im/√2; c2r[4,[2,4]].=1/√2 .*[1,-1]
     c2r[5,[5,9]].=im/√2 .*[1,-1]; c2r[9,[5,9]].=1/√2
@@ -62,12 +66,16 @@ p are the locations of the points (N x 3)
 rv stores the distance vector between the ijth points (NNZ x 3)
 r is the magnitude of rv (NNZ x 1)
 N = number of nodes in the graph
-NN is the number of neighbors for each node (N x 1)
-sp is a boolean sparse matrix (N x NNZ)
+Y contains the spherical harmonics of each rv pair, up to a finite rank
+cartbasis is the cartesian rank-2 tensor basis for the spherical harmonics.
+    T_ij = Y_lm * cartbasis_lmij is the cartesian tensor from the Y_lm coefficients
+sp is a sparse matrix (N x NNZ)
     The kth column of sp has one non-zero entry at the ith row given by i[k]
-    sp*α performs a row-wise sum of the sparse mat defined by (i,j,α)
+    sp*α maps a list of pairwise features α to nodal features by summing over edges
+    The entries in sp can be boolean for a simple sum
+        or weighted by the graph (normalized) Laplacian
 
-    Given a vector of edge weights β of size (NNZ x 1), 
+    Given a vector of edge weights β of size (NNZ x 1) and boolean sp, 
     sp*β is the equivalent operation to A_β*ones(N), 
     where A_β is the weighted adjecency matrix with weights given by β
 
@@ -96,7 +104,7 @@ function GraphStruct(i::AbstractVector,j::AbstractVector,p::AbstractArray)
     deg = dropdims(sum(sparse(i,j,1),dims=2),dims=2) .-1
     L = -ones(NNZ); L[i.==j] .= deg[i[i.==j]] # graph laplacian
     Ln = -1 ./sqrt.(deg[i].*deg[j]); Ln[i.==j] .= 1 # normalized laplacian
-    sp = sparse(tr(i.==(1:N)')).*Float32.(L)'
+    sp = sparse(tr(i.==(1:N)')).*Float32.(Ln)'
 
     rv = p[i,:].-p[j,:]
     r = sqrt.(sum(abs2,rv,dims=2))
@@ -117,24 +125,20 @@ Layers are defined using their input and ouput tensor ranks
 e.g. Eton00 accepts and ouputs scalar features
      Eton01 accepts scalars and outputs vectors
 
-All layers have a trainable weight matrix (f_in x f_out)
-that linearly transforms input features (regardless of rank)
+All layers have a trainable weight array (c_in x c_out x p)
+where the p dimension is used as a polynomial expansion basis 
+for radial variations in the filter
 
-All layers have a trainable RBF that accepts a radius and
-outputs a radial weight per output channel
+There is one weight array for each tensor rank used in the layer
 """
 #####################
 """
-Applies a pointwise weighting to the output features as well
-    Accepts input features at a location and outputs a weight
-    for each output feature at the same location
 Layer operations:
-    1. Linearly transform input features
-    2. Generate and apply pointwise weights
-    3. Calculate RBF for each connection in the graph
-    4. Apply radial weights to the output features
-    5. Convolve with sp
-    6. Sum pointwise and pairwise and apply NL
+    1. Compute c_in x c_out for each r_ij by contracting the p dimension
+        Note the r = 0 intercept can be non-zero as this is a scalar filter
+    2. Apply the filters to the input X via contraction along c_in
+    3. Convolve with sp
+    4. Apply NL and bias
 """
 struct Eton00{T,F,G}
     weight::AbstractArray{T}
@@ -157,10 +161,12 @@ function (e::Eton00)(X::AbstractArray{T}) where {T}
 
     Rp = e.gs[].r.^(0:size(e.weight,3)-1)'
     w = e.weight
-    @tullio f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
+    # f = Flux.batched_mul(Rp,permutedims(w,[3,1,2]))
+    @ein f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
 
     Xj = X[e.gs[].j,:]
-    @tullio Z[nnz,co] := f[nnz,ci,co]*Xj[nnz,ci]
+    # Z = Flux.batched_mul(permutedims(f,[3,2,1]),adim(tr(Xj),2))[:,1,:]|>tr
+    @ein Z[nnz,co] := f[nnz,ci,co]*Xj[nnz,ci]
    
     out = e.gs[].sp*Z
     out = e.σ.(out.+tr(e.bias))
@@ -170,17 +176,13 @@ end
 
 #####################
 """
-Higher order layers need directional filters for each output channel
-    For a vector filter, this is stored with an array of size (2 x f_out)
 Layer operations:
-    1. Linearly transform input features
-    2. Normalize vector filters with magnitude
-    3. Rotate the filters by θ (angle of rv) for each pairwise connection
-    4. Calculate RBF for each connection in the graph
-    5. Apply radial weights to filters
-    6. Scalar multiply output features by the now weighted vector filters
-    5. Convolve with sp
-    6. Apply NL to magnitude of the output features
+    1. Compute c_in x c_out for each r_ij by contracting the p dimension
+        Note the r = 0 intercept must be zero
+    2. Multiply with spherical harmonics to "point" the filter in the rv direction
+    3. Apply the filters to the input X via contraction along c_in
+    4. Convolve with sp
+    5. Apply NL and bias to magnitude of output and multiply
 """
 struct Eton01{T,F,G}
     weight::AbstractArray{T}
@@ -203,90 +205,88 @@ function (e::Eton01)(X::AbstractArray{T}) where {T}
    
     Rp = e.gs[].r.^(1:size(e.weight,3))'
     w = e.weight
-    @tullio f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
+    @ein f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
 
     rh = e.gs[].Y[2][:,[3,1,2]]
     f = f.*adim(adim(rh,2),2)
 
     Xj = X[e.gs[].j,:]
-    @tullio Z[nnz,co,d] := f[nnz,ci,co,d]*Xj[nnz,ci]
+    @ein Z[nnz,co,d] := f[nnz,ci,co,d]*Xj[nnz,ci]
     
     sp = e.gs[].sp
-    @tullio out[n,co,d] := sp[n,nnz]*Z[nnz,co,d]
+    out = reshape(sp*reshape(Z,size(Z,1),size(Z,2)*size(Z,3)),size(sp,1),size(Z,2),size(Z,3))
+    # @ein out[n,co,d] := sp[n,nnz]*Z[nnz,co,d]
     out = e.σ.(mag(out).+tr(e.bias)).*out
     
     return out
 end
 
 #####################
-"""
-Higher order layers need directional filters for each output channel
-    For a vector filter, this is stored with an array of size (2 x f_out)
-Layer operations:
-    1. Linearly transform input features
-    2. Normalize vector filters with magnitude
-    3. Rotate the filters by θ (angle of rv) for each pairwise connection
-    4. Calculate RBF for each connection in the graph
-    5. Apply radial weights to filters
-    6. Take the inner product of output features and weighted vector filters
-    5. Convolve with sp
-    6. Apply NL
-"""
-struct Eton10{T,Fi,R,F,G<:GraphStruct}
-    weight::AbstractArray{T}
-    bias::AbstractVector{T}
-    σ::F
-    gs::G
-    ch::Pair{<:Integer,<:Integer}
-end
+# """
+# Higher order layers need directional filters for each output channel
+#     For a vector filter, this is stored with an array of size (2 x f_out)
+# Layer operations:
+#     1. Linearly transform input features
+#     2. Normalize vector filters with magnitude
+#     3. Rotate the filters by θ (angle of rv) for each pairwise connection
+#     4. Calculate RBF for each connection in the graph
+#     5. Apply radial weights to filters
+#     6. Take the inner product of output features and weighted vector filters
+#     5. Convolve with sp
+#     6. Apply NL
+# """
+# struct Eton10{T,Fi,R,F,G<:GraphStruct}
+#     weight::AbstractArray{T}
+#     bias::AbstractVector{T}
+#     σ::F
+#     gs::G
+#     ch::Pair{<:Integer,<:Integer}
+# end
 
-function Eton10(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, radial, σ = identity;
-    init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
-    b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
-    Eton10(T.(init(ch[1], ch[2])), b, T.(init(2, ch[2])), radial, σ, gs, ch)
-end
+# function Eton10(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, radial, σ = identity;
+#     init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
+#     b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
+#     Eton10(T.(init(ch[1], ch[2])), b, T.(init(2, ch[2])), radial, σ, gs, ch)
+# end
 
-function Eton10(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, hl::Int = 16, 
-    γ = identity, σ = identity; kwargs...)
-    radial = Chain(Dense(1,hl,γ), Dense(hl,ch[2]))
-    Eton10(gs, ch, radial, σ; kwargs...)
-end
+# function Eton10(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, hl::Int = 16, 
+#     γ = identity, σ = identity; kwargs...)
+#     radial = Chain(Dense(1,hl,γ), Dense(hl,ch[2]))
+#     Eton10(gs, ch, radial, σ; kwargs...)
+# end
 
-Flux.@functor Eton10
+# Flux.@functor Eton10
 
-function (e::Eton10)(X::AbstractArray{T}) where {T}
-    # Linear transform input features
-    Xo = batchmul(X,e.weight) # N x fo x 2
-    # Rotate each filter
-    filter = e.filter./(sqrt.(sum(e.filter.^2,dims=1)))
-    F = Flux.stack(batchmul.([rot(e.gs.θ)],Flux.unstack(adim(filter,2),3)),4) # 2 x 1 x NNZ x fo
-    F = dropdims(permutedims(F,[3,4,1,2]),dims=4) # NNZ x fo x 2
-    # Calculate RBF
-    R = tr(e.radial(e.gs.r|>tr)) # NNZ x fo
-    # Radially weight filters
-    G = F.*R # NNZ x fo x 2
-    # Apply filters via inner product
-    Y = dropdims(sum(Xo[e.gs.j,:,:].*G,dims=3),dims=3) # NNZ x fo
-    # Convolve
-    Y = e.gs.sp*Y # N x fo
-    # Non-linearity
-    out = e.σ.(Y)
-    return out
-end
+# function (e::Eton10)(X::AbstractArray{T}) where {T}
+#     # Linear transform input features
+#     Xo = batchmul(X,e.weight) # N x fo x 2
+#     # Rotate each filter
+#     filter = e.filter./(sqrt.(sum(e.filter.^2,dims=1)))
+#     F = Flux.stack(batchmul.([rot(e.gs.θ)],Flux.unstack(adim(filter,2),3)),4) # 2 x 1 x NNZ x fo
+#     F = dropdims(permutedims(F,[3,4,1,2]),dims=4) # NNZ x fo x 2
+#     # Calculate RBF
+#     R = tr(e.radial(e.gs.r|>tr)) # NNZ x fo
+#     # Radially weight filters
+#     G = F.*R # NNZ x fo x 2
+#     # Apply filters via inner product
+#     Y = dropdims(sum(Xo[e.gs.j,:,:].*G,dims=3),dims=3) # NNZ x fo
+#     # Convolve
+#     Y = e.gs.sp*Y # N x fo
+#     # Non-linearity
+#     out = e.σ.(Y)
+#     return out
+# end
 
 #####################
 """
-Higher order layers need directional filters for each output channel
-    For a tensor filter, this is stored with an array of size (2 x 2 x f_out)
 Layer operations:
-    1. Linearly transform input features
-    2. Normalize tensor filters with trace
-    3. Rotate the filters by θ (angle of rv) for each pairwise connection
-    4. Calculate RBF for each connection in the graph
-    5. Apply radial weights to filters
-    6. Multiply weighted tensor filters by vector output features 
+    1. Compute c_in x c_out for each r_ij and each rank by contracting the p dimension
+        Note the r = 0 intercept must be zero for rank-1,2
+    2. Multiply with spherical harmonics to "point" the filter in the rv direction
+    3. Apply the filters to the input X via contraction along c_in 
+        and d2 to apply the cartesian tensor operator
     5. Convolve with sp
-    6. Apply NL to magnitude of the output features
+    6. Apply NL and bias to magnitude of output and multiply
 """
 struct Eton11{T,F,G}
     weight0::AbstractArray{T}
@@ -313,10 +313,10 @@ function (e::Eton11)(X::AbstractArray{T}) where {T}
     
     w0,w1,w2 = e.weight0, e.weight1, e.weight2
     Rp = e.gs[].r.^(0:size(e.weight0,3)-1)'
-    @tullio f0[nnz,ci,co] := Rp[nnz,p]*w0[ci,co,p]
+    @ein f0[nnz,ci,co] := Rp[nnz,p]*w0[ci,co,p]
     Rp = Rp[:,2:end]
-    @tullio f1[nnz,ci,co] := Rp[nnz,p]*w1[ci,co,p]
-    @tullio f2[nnz,ci,co] := Rp[nnz,p]*w2[ci,co,p]
+    @ein f1[nnz,ci,co] := Rp[nnz,p]*w1[ci,co,p]
+    @ein f2[nnz,ci,co] := Rp[nnz,p]*w2[ci,co,p]
 
     f0 = f0.*adim(adim(adim(e.gs[].Y[1],2),2),2)
     f1 = f1.*adim(adim(e.gs[].Y[2],2),2)
@@ -325,10 +325,11 @@ function (e::Eton11)(X::AbstractArray{T}) where {T}
     f = sum(f.*adim(adim(adim(e.gs[].cartbasis,1),1),1),dims=4)[:,:,:,1,:,:]
 
     Xj = X[e.gs[].j,:,:]
-    @tullio Z[nnz,co,d1] := f[nnz,ci,co,d1,d2]*Xj[nnz,ci,d2]
+    @ein Z[nnz,co,d1] := f[nnz,ci,co,d1,d2]*Xj[nnz,ci,d2]
     
     sp = e.gs[].sp
-    @tullio out[n,co,d] := sp[n,nnz]*Z[nnz,co,d]
+    out = reshape(sp*reshape(Z,size(Z,1),size(Z,2)*size(Z,3)),size(sp,1),size(Z,2),size(Z,3))
+    # @ein out[n,co,d] := sp[n,nnz]*Z[nnz,co,d]
     out = e.σ.(mag(out).+tr(e.bias)).*out
     
     return out

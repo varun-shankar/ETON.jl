@@ -2,10 +2,9 @@ using NearestNeighbors
 using Distributions
 using Plots
 using Flux
-using GeometricFlux
 using SparseArrays
 using LinearAlgebra
-using Tullio
+using OMEinsum; allow_loops(false)
 using Statistics
 using Zygote
 using IterTools
@@ -15,6 +14,7 @@ using SEM
 using Setfield
 using UnPack
 using BSON: @save, @load
+using NPZ
 
 include("helpers.jl")
 include("network.jl")
@@ -22,8 +22,8 @@ include("network.jl")
 ###################################################################################################
 ## Generate Graph ##
 
-Ex = 8; nr1 = 8;
-Ey = 8; ns1 = 8;
+Ex = 16; nr1 = 2;
+Ey = 16; ns1 = 2;
 
 ifperiodic = [false,false]
 m1 = Mesh(nr1,ns1,Ex,Ey,ifperiodic)
@@ -69,9 +69,9 @@ data = [(.3*rand(),.3*rand()) for i=1:500]
 ## Model ##
 
 # encoder = Dense(1,64)
-eton = Chain(Eton00(gs,1=>8,3,swish),
-             Eton00(gs,8=>8,3,swish),
-             Eton00(gs,8=>8,3,swish),
+eton = Chain(Eton01(gs,1=>8,3,swish),
+             Eton11(gs,8=>8,3,swish),
+             Eton11(gs,8=>8,3,swish), mag
              Eton00(gs,8=>8,3,swish),
              Eton00(gs,8=>8,3,swish),
              Eton00(gs,8=>8,3,swish),
