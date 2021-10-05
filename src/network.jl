@@ -143,38 +143,38 @@ Layer operations:
     3. Convolve with sp
     4. Apply NL and bias
 """
-struct Eton00{T,F,G}
+struct Eton00{T,F}
     weight::AbstractArray{T}
     bias::AbstractVector{T} 
     σ::F
-    gs::G
     ch::Pair{<:Integer,<:Integer}
 end
 
-function Eton00(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, p, σ = identity;
+function Eton00(ch::Pair{<:Integer,<:Integer}, p, σ = identity;
     init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
     b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
     w = T.(init(ch[1], ch[2], p+1))
-    Eton00(w, b, σ, Ref(gs), ch)
+    Eton00(w, b, σ, ch)
 end
 
 Flux.@functor Eton00
 
-function (e::Eton00)(X::AbstractArray{T}) where {T}
+function (e::Eton00)(Xgs::Tuple{AbstractArray{T},GraphStruct{T}}) where {T}
+    X, gs = Xgs
 
-    Rp = e.gs[].r.^(0:size(e.weight,3)-1)'
+    Rp = gs.r.^(0:size(e.weight,3)-1)'
     w = e.weight
     # f = Flux.batched_mul(Rp,permutedims(w,[3,1,2]))
     @ein f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
 
-    Xj = X[e.gs[].j,:]
+    Xj = X[gs.j,:] #cat(X[gs.j,:],X[gs.i,:],dims=2)
     # Z = Flux.batched_mul(permutedims(f,[3,2,1]),adim(tr(Xj),2))[:,1,:]|>tr
     @ein Z[nnz,co] := f[nnz,ci,co]*Xj[nnz,ci]
    
-    out = e.gs[].sp*Z
+    out = gs.sp*Z
     out = e.σ.(out.+tr(e.bias))
     
-    return out
+    return (out,gs)
 end
 
 #####################
@@ -187,41 +187,41 @@ Layer operations:
     4. Convolve with sp
     5. Apply NL and bias to magnitude of output and multiply
 """
-struct Eton01{T,F,G}
+struct Eton01{T,F}
     weight::AbstractArray{T}
     bias::AbstractVector{T}
     σ::F
-    gs::G
     ch::Pair{<:Integer,<:Integer}
 end
 
-function Eton01(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, p, σ = identity;
+function Eton01(ch::Pair{<:Integer,<:Integer}, p, σ = identity;
     init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
     b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
     w = T.(init(ch[1], ch[2], p))
-    Eton01(w, b, σ, Ref(gs), ch)
+    Eton01(w, b, σ, ch)
 end
 
 Flux.@functor Eton01
 
-function (e::Eton01)(X::AbstractArray{T}) where {T}
-   
-    Rp = e.gs[].r.^(1:size(e.weight,3))'
+function (e::Eton01)(Xgs::Tuple{AbstractArray{T},GraphStruct{T}}) where {T}
+    X, gs = Xgs
+
+    Rp = gs.r.^(1:size(e.weight,3))'
     w = e.weight
     @ein f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
 
-    rh = e.gs[].Y[2][:,[3,1,2]]
+    rh = gs.Y[2][:,[3,1,2]]
     f = f.*adim(adim(rh,2),2)
 
-    Xj = X[e.gs[].j,:]
+    Xj = X[gs.j,:]
     @ein Z[nnz,co,d] := f[nnz,ci,co,d]*Xj[nnz,ci]
     
-    sp = e.gs[].sp
+    sp = gs.sp
     out = reshape(sp*reshape(Z,size(Z,1),size(Z,2)*size(Z,3)),size(sp,1),size(Z,2),size(Z,3))
     # @ein out[n,co,d] := sp[n,nnz]*Z[nnz,co,d]
     out = e.σ.(mag(out).+tr(e.bias)).*out
     
-    return out
+    return (out,gs)
 end
 
 #####################
@@ -234,39 +234,39 @@ Layer operations:
     4. Convolve with sp
     5. Apply NL and bias to magnitude of output and multiply
 """
-struct Eton10{T,F,G}
+struct Eton10{T,F}
     weight::AbstractArray{T}
     bias::AbstractVector{T}
     σ::F
-    gs::G
     ch::Pair{<:Integer,<:Integer}
 end
 
-function Eton10(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, p, σ = identity;
+function Eton10(ch::Pair{<:Integer,<:Integer}, p, σ = identity;
     init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
     b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
     w = T.(init(ch[1], ch[2], p))
-    Eton10(w, b, σ, Ref(gs), ch)
+    Eton10(w, b, σ, ch)
 end
 
 Flux.@functor Eton10
 
-function (e::Eton10)(X::AbstractArray{T}) where {T}
-   
-    Rp = e.gs[].r.^(1:size(e.weight,3))'
+function (e::Eton10)(Xgs::Tuple{AbstractArray{T},GraphStruct{T}}) where {T}
+    X, gs = Xgs
+
+    Rp = gs.r.^(1:size(e.weight,3))'
     w = e.weight
     @ein f[nnz,ci,co] := Rp[nnz,p]*w[ci,co,p]
 
-    rh = e.gs[].Y[2][:,[3,1,2]]
+    rh = gs.Y[2][:,[3,1,2]]
     f = f.*adim(adim(rh,2),2)
 
-    Xj = X[e.gs[].j,:,:]
+    Xj = X[gs.j,:,:]
     @ein Z[nnz,co] := f[nnz,ci,co,d]*Xj[nnz,ci,d]
     
-    out = e.gs[].sp*Z
+    out = gs.sp*Z
     out = e.σ.(out.+tr(e.bias))
     
-    return out
+    return (out,gs)
 end
 
 #####################
@@ -280,51 +280,51 @@ Layer operations:
     5. Convolve with sp
     6. Apply NL and bias to magnitude of output and multiply
 """
-struct Eton11{T,F,G}
+struct Eton11{T,F}
     weight0::AbstractArray{T}
     weight1::AbstractArray{T}
     weight2::AbstractArray{T}
     bias::AbstractVector{T}
     σ::F
-    gs::G
     ch::Pair{<:Integer,<:Integer}
 end
 
-function Eton11(gs::GraphStruct, ch::Pair{<:Integer,<:Integer}, p, σ = identity;
+function Eton11(ch::Pair{<:Integer,<:Integer}, p, σ = identity;
     init=Flux.glorot_uniform, T::DataType=Float32, bias::Bool=false)
     b = bias ? T.(init(ch[2])) : zeros(T, ch[2])
     w0 = T.(init(ch[1], ch[2], p+1))
     w1 = T.(init(ch[1], ch[2], p))
     w2 = T.(init(ch[1], ch[2], p))
-    Eton11(w0, w1, w2, b, σ, Ref(gs), ch)
+    Eton11(w0, w1, w2, b, σ, ch)
 end
 
 Flux.@functor Eton11
 
-function (e::Eton11)(X::AbstractArray{T}) where {T}
-    
+function (e::Eton11)(Xgs::Tuple{AbstractArray{T},GraphStruct{T}}) where {T}
+    X, gs = Xgs
+
     w0,w1,w2 = e.weight0, e.weight1, e.weight2
-    Rp = e.gs[].r.^(0:size(e.weight0,3)-1)'
+    Rp = gs.r.^(0:size(e.weight0,3)-1)'
     @ein f0[nnz,ci,co] := Rp[nnz,p]*w0[ci,co,p]
     Rp = Rp[:,2:end]
     @ein f1[nnz,ci,co] := Rp[nnz,p]*w1[ci,co,p]
     @ein f2[nnz,ci,co] := Rp[nnz,p]*w2[ci,co,p]
 
-    f0 = f0.*adim(adim(adim(e.gs[].Y[1],2),2),2)
-    f1 = f1.*adim(adim(e.gs[].Y[2],2),2)
-    f2 = f2.*adim(adim(e.gs[].Y[3],2),2)
+    f0 = f0.*adim(adim(adim(gs.Y[1],2),2),2)
+    f1 = f1.*adim(adim(gs.Y[2],2),2)
+    f2 = f2.*adim(adim(gs.Y[3],2),2)
     f = cat(f0,f1,f2,dims=4)
-    f = sum(f.*adim(adim(adim(e.gs[].cartbasis,1),1),1),dims=4)[:,:,:,1,:,:]
+    f = sum(f.*adim(adim(adim(gs.cartbasis,1),1),1),dims=4)[:,:,:,1,:,:]
 
-    Xj = X[e.gs[].j,:,:]
+    Xj = X[gs.j,:,:]
     @ein Z[nnz,co,d1] := f[nnz,ci,co,d1,d2]*Xj[nnz,ci,d2]
     
-    sp = e.gs[].sp
+    sp = gs.sp
     out = reshape(sp*reshape(Z,size(Z,1),size(Z,2)*size(Z,3)),size(sp,1),size(Z,2),size(Z,3))
     # @ein out[n,co,d] := sp[n,nnz]*Z[nnz,co,d]
     out = e.σ.(mag(out).+tr(e.bias)).*out
     
-    return out
+    return (out,gs)
 end
 
 #####################

@@ -1,4 +1,4 @@
-export adim, build_graph, tr, mag, R
+export adim, build_graph, tr, mag, R, addGraph, rmGraph
 
 function adim(x,i=0)
     if i==0; i=ndims(x)+1; end
@@ -38,3 +38,6 @@ R(θ,φ,γ)=[1 0       0     ;
                              -sin(φ) 0 cos(φ)]*[cos(γ) -sin(γ) 0;
                                                 sin(γ)  cos(γ) 0;
                                                 0       0      1]
+
+addGraph(gs) = x->(x,gs)
+rmGraph(xgs) = xgs[1]
